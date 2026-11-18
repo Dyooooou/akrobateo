@@ -1,0 +1,126 @@
+kind: pipeline
+name: main
+
+platform:
+  os: linux
+  arch: amd64
+
+workspace:
+  base: /go
+  path: src/github.com/kontena/akrobateo
+
+steps:
+  - name: build
+    image: golang:1.11
+    commands:
+      - mkdir -p /go/bin
+      - curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
+      - dep ensure -v -vendor-only
+      - ./build.sh
+
+  - name: release
+    image: plugins/github-release
+    settings:
+      api_key:
+        from_secret: github_token
+      files:
+        - output/*
+      draft: true # Add changelog and publish manually
+      checksum:
+        - sha256
+    when:
+      event: tag
+
+  # build and deploy quay.io/kontena/akrobateo-amd64:<tag>
+  - name: docker-amd64
+    group: docker
+    image: plugins/docker
+    settings:
+      registry: quay.io
+      dockerfile: Dockerfile
+      build_args:
+        - ARCH=amd64
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      repo: quay.io/kontena/akrobateo-amd64
+      auto_tag: true
+
+  # build and deploy quay.io/kontena/akrobateo-arm64:<tag>
+  - name: docker-arm64
+    group: docker
+    image: plugins/docker
+    settings:
+      registry: quay.io
+      dockerfile: Dockerfile
+      build_args:
+        - ARCH=arm64
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      repo: quay.io/kontena/akrobateo-arm64
+      auto_tag: true
+
+  # Build the LB image for amd64
+  - name: docker-lb-amd64
+    group: docker
+    image: plugins/docker
+    settings:
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      registry: quay.io
+      dockerfile: lb-image/Dockerfile
+      context: lb-image/
+      repo: quay.io/kontena/akrobateo-lb-amd64
+      auto_tag: true
+
+---
+kind: pipeline
+name: lb-arm64
+
+depends_on:
+- main
+
+platform:
+  os: linux
+  arch: arm64
+
+steps:
+  # Build the LB image for arm64
+  - name: docker-lb-arm64
+    group: docker
+    image: plugins/docker
+    settings:
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+      registry: quay.io
+      dockerfile: lb-image/Dockerfile
+      context: lb-image/
+      repo: quay.io/kontena/akrobateo-lb-arm64
+      auto_tag: true
+
+---
+kind: pipeline
+name: multi-arch-images
+
+depends_on:
+- lb-arm64
+
+steps:
+- name: multi-arch-images
+  image: docker.io/kontenapharos/skopeo:latest
+  environment:
+    DOCKER_CREDS:
+      from_secret: docker_creds
+  commands:
+    - ./multiarch.sh
+  when:
+    ref:
+    - refs/heads/master
+    - refs/tags/*
